@@ -5,6 +5,8 @@ Run: streamlit run app.py
 """
 
 import io
+import os
+import sys
 from contextlib import redirect_stdout
 from datetime import date, datetime
 
@@ -448,10 +450,11 @@ st.markdown(f"""
 # ══════════════════════════════════════════════════════════════════════════════
 #  TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab_bt, tab_p1, tab_p2 = st.tabs([
+tab_bt, tab_p1, tab_p2, tab_orb = st.tabs([
     "BACKTEST",
     "PHASE 1 · SIGNALS",
     "PHASE 2 · TRADES",
+    "ORB · CONFLUENCE",
 ])
 
 
@@ -1057,6 +1060,239 @@ with tab_p2:
           </div>
           <div style='font-size:10px;margin-top:8px;'>
             4-Factor Cross-Sectional OLS  ·  Dual-Agreement Gate  ·  Trade Orders
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 4 — ORB · CONFLUENCE
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_orb:
+    st.markdown('<div class="tab-body">', unsafe_allow_html=True)
+
+    c1, c2, c3, c4 = st.columns([2, 1.2, 1, 4])
+    with c1:
+        orb_date = st.date_input(
+            "Analysis Date",
+            value=date.today(),
+            key="orb_date",
+        )
+    with c2:
+        orb_threshold = st.number_input(
+            "Momentum Score |Threshold|",
+            min_value=1, max_value=8, value=7, step=1,
+            key="orb_threshold",
+        )
+    with c3:
+        st.markdown("<div style='margin-top:20px;'>", unsafe_allow_html=True)
+        orb_run = st.button("▶ RUN", key="orb_run")
+        st.markdown("</div>", unsafe_allow_html=True)
+    with c4:
+        st.markdown(f"""
+        <div style='margin-top:8px;font-size:10px;color:{TEXT3};line-height:2;'>
+          Takes the <strong style='color:{TEXT2};'>Top 5 ORB candidates</strong> by trend quality score,
+          then cross-references with the <strong style='color:{TEXT2};'>Momentum Alpha engine</strong>.
+          Passes if score <strong style='color:{AMBER};'>≥ threshold</strong> (strong BUY) or
+          <strong style='color:{RED};'>≤ −threshold</strong> (strong SELL).
+        </div>
+        """, unsafe_allow_html=True)
+
+    if orb_run:
+        _orb_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Trend Screener")
+        if _orb_dir not in sys.path:
+            sys.path.insert(0, _orb_dir)
+        from orb_trend_screener_nifty100 import run_screener as _run_orb
+        from combined_strategy import phase1 as _phase1
+
+        _date_str = orb_date.strftime("%Y-%m-%d")
+        log_buf   = io.StringIO()
+        log_buf2  = io.StringIO()
+        orb_df    = None
+        mom_result = None
+        orb_err   = None
+        mom_err   = None
+
+        try:
+            with st.spinner("Running ORB trend screener…"):
+                with redirect_stdout(log_buf):
+                    orb_df = _run_orb(target_date=_date_str)
+        except Exception as e:
+            orb_err = str(e)
+
+        try:
+            with st.spinner("Computing momentum signals…"):
+                with redirect_stdout(log_buf2):
+                    mom_result = _phase1(signal_date=_date_str, verbose=True)
+        except Exception as e:
+            mom_err = str(e)
+
+        top5     = []
+        top5_mom = pd.DataFrame()
+        dual     = []
+
+        if orb_df is not None:
+            top5 = orb_df.head(5)["Ticker"].tolist()
+
+        _thresh = int(orb_threshold)
+
+        if mom_result is not None and top5:
+            _mdf = mom_result["signals_df"].copy()
+            _mdf["_tkr"] = _mdf["ticker"].str.replace(".NS", "", regex=False)
+            top5_mom = _mdf[_mdf["_tkr"].isin(top5)].copy()
+            dual = top5_mom[
+                (top5_mom["score"] >= _thresh) | (top5_mom["score"] <= -_thresh)
+            ]["_tkr"].tolist()
+
+        st.session_state["orb"] = {
+            "orb_df":    orb_df,
+            "top5":      top5,
+            "top5_mom":  top5_mom,
+            "dual":      dual,
+            "date":      _date_str,
+            "threshold": _thresh,
+            "log":       log_buf.getvalue() + "\n" + log_buf2.getvalue(),
+            "orb_err":   orb_err,
+            "mom_err":   mom_err,
+        }
+        st.rerun()
+
+    if "orb" in st.session_state and st.session_state["orb"]:
+        r        = st.session_state["orb"]
+        orb_df   = r["orb_df"]
+        top5     = r["top5"]
+        top5_mom = r["top5_mom"]
+        dual     = r["dual"]
+        _thresh  = r.get("threshold", 7)
+
+        if r.get("orb_err"):
+            st.markdown(f'<div class="alert-err">ORB screener error: {r["orb_err"]}</div>',
+                        unsafe_allow_html=True)
+        if r.get("mom_err"):
+            st.markdown(f'<div class="alert-err">Momentum engine error: {r["mom_err"]}</div>',
+                        unsafe_allow_html=True)
+
+        # ── Dual-confirmed highlight ──────────────────────────────────────
+        sec(f"DUAL-CONFIRMED STOCKS  ·  {r['date']}  ·  TOP 5 ORB  ∩  MOMENTUM |SCORE| ≥ {_thresh}")
+        if dual:
+            def _card_color(tkr):
+                row = top5_mom[top5_mom["_tkr"] == tkr]
+                if len(row) == 0:
+                    return GREEN, "#001a08", GREEN
+                sc = int(row.iloc[0]["score"])
+                if sc >= _thresh:
+                    return GREEN, "#001a08", GREEN
+                return RED, "#1a0000", RED
+
+            cards_html = ""
+            for t in dual:
+                txt_col, bg_col, brd_col = _card_color(t)
+                row = top5_mom[top5_mom["_tkr"] == t]
+                sc_label = f"+{int(row.iloc[0]['score'])}" if len(row) > 0 else ""
+                cards_html += (
+                    f'<div style="display:inline-block;background:{bg_col};border:2px solid {brd_col};'
+                    f'padding:12px 24px;margin:6px 8px 6px 0;font-family:Courier New,monospace;">'
+                    f'<div style="font-size:18px;font-weight:700;color:{txt_col};letter-spacing:.15em;">{t}</div>'
+                    f'<div style="font-size:10px;color:{txt_col};opacity:.7;margin-top:3px;">score {sc_label}</div>'
+                    f'</div>'
+                )
+            st.markdown(f'<div style="margin-bottom:14px;">{cards_html}</div>',
+                        unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div class="alert-warn">No stocks passed both filters — '
+                f'none of the Top 5 ORB candidates had |Momentum score| ≥ {_thresh}.</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── ORB Top 5 table ───────────────────────────────────────────────
+        if orb_df is not None:
+            sec("TOP 5 ORB CANDIDATES  ·  TREND QUALITY SCORE")
+            top5_df  = orb_df.head(5)
+            orb_hdr  = ('<tr><th>Rank</th><th>Ticker</th><th>ORB Score</th>'
+                        '<th>Eff. Ratio</th><th>ADX</th><th>R²</th><th>Bars</th></tr>')
+            orb_rows = []
+            for _, row in top5_df.iterrows():
+                is_dc    = row["Ticker"] in dual
+                bg       = 'style="background:#001a08;"' if is_dc else ""
+                sc_cls   = "pos" if row["Score"] >= 0.60 else ("amb" if row["Score"] >= 0.40 else "neg")
+                tkr_col  = GREEN if is_dc else TEXT
+                tkr_wt   = "700" if is_dc else "400"
+                orb_rows.append(
+                    f'<tr {bg}>'
+                    f'<td class="neu">{int(row["Rank"])}</td>'
+                    f'<td style="color:{tkr_col};font-weight:{tkr_wt};">'
+                    f'{row["Ticker"]}{"  ★" if is_dc else ""}</td>'
+                    f'<td class="{sc_cls}">{row["Score"]:.4f}</td>'
+                    f'<td class="neu">{row["Eff.Ratio"]:.4f}</td>'
+                    f'<td class="neu">{row["ADX"]:.1f}</td>'
+                    f'<td class="neu">{row["R²"]:.4f}</td>'
+                    f'<td class="neu">{int(row["Bars"])}</td>'
+                    f'</tr>'
+                )
+            st.markdown(
+                f'<div style="border:1px solid {BORDER};margin-bottom:12px;">'
+                f'<table class="dt"><thead>{orb_hdr}</thead>'
+                f'<tbody>{"".join(orb_rows)}</tbody></table></div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── Momentum scores for ORB top 5 ────────────────────────────────
+        if top5_mom is not None and len(top5_mom) > 0:
+            sec("MOMENTUM ALPHA SCORES  ·  ORB TOP 5 ONLY")
+
+            def _alpha_cell(v):
+                if v == 1:  return '<td class="pos">+1</td>'
+                if v == -1: return '<td class="neg">-1</td>'
+                return '<td class="dash">0</td>'
+
+            alpha_cols = [c for c in top5_mom.columns if c.startswith("a")]
+            mom_hdr = (
+                '<tr><th>Ticker</th><th>Signal</th><th>Score</th><th>Confidence</th>'
+                + "".join(f'<th>{c.upper()}</th>' for c in alpha_cols)
+                + '</tr>'
+            )
+            mom_rows = []
+            for _, row in top5_mom.sort_values("score", ascending=False).iterrows():
+                is_dc    = row["_tkr"] in dual
+                bg       = 'style="background:#001a08;"' if is_dc else ""
+                sc       = row["score"]
+                sc_cls   = "pos" if sc >= _thresh else ("neg" if sc <= -_thresh else ("amb" if sc > 0 else ("neg" if sc < 0 else "dash")))
+                conf_cls = "g" if row["confidence"] >= 75 else ("a" if row["confidence"] >= 50 else "")
+                tkr_col  = GREEN if is_dc else TEXT
+                tkr_wt   = "700" if is_dc else "400"
+                alpha_cells = "".join(_alpha_cell(row[c]) for c in alpha_cols)
+                mom_rows.append(
+                    f'<tr {bg}>'
+                    f'<td style="color:{tkr_col};font-weight:{tkr_wt};">'
+                    f'{row["_tkr"]}{"  ★" if is_dc else ""}</td>'
+                    f'<td>{badge(row["signal"])}</td>'
+                    f'<td class="{sc_cls}">{int(sc):+d}</td>'
+                    f'<td class="{conf_cls}">{row["confidence"]:.1f}%</td>'
+                    + alpha_cells
+                    + '</tr>'
+                )
+            st.markdown(
+                f'<div style="border:1px solid {BORDER};margin-bottom:12px;">'
+                f'<table class="dt"><thead>{mom_hdr}</thead>'
+                f'<tbody>{"".join(mom_rows)}</tbody></table></div>',
+                unsafe_allow_html=True,
+            )
+
+        with st.expander("EXECUTION LOG"):
+            st.code(r.get("log", "(empty)"), language=None)
+
+    else:
+        st.markdown(f"""
+        <div style='text-align:center;padding:80px 0;color:{TEXT3};'>
+          <div style='font-size:40px;margin-bottom:16px;opacity:.3;'>🎯</div>
+          <div style='font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:{TEXT2};'>
+            Select a date and click RUN — finds ORB Top 5 stocks with |Momentum score| ≥ threshold
+          </div>
+          <div style='font-size:10px;margin-top:8px;'>
+            ORB Trend Quality  ×  8-Alpha Momentum Ensemble  ·  Dual-Filter Confluence Gate
           </div>
         </div>
         """, unsafe_allow_html=True)
