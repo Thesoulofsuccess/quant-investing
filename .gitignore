@@ -18,6 +18,9 @@ env/
 # Generated outputs
 equity_curve.png
 momentum_signals.csv
+orb_momentum_results.csv
+Trend Screener/orb_screener_nifty100_results.csv
+*_results.csv
 
 # IDE / OS
 .vscode/
@@ -28,6 +31,16 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
-# Secrets
+# Secrets & sensitive
 secrets.toml
 .streamlit/secrets.toml
+API KEYS/
+
+# Claude Code internal
+.claude/
+
+# Reference docs (PDFs & raw text — not needed in repo)
+*.pdf
+Combined.txt
+Core Logic - 4 Factor.txt
+Momentum alphas - Filter Logic.txt
